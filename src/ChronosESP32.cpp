@@ -479,6 +479,19 @@ bool ChronosESP32::isAnyAlarmActive()
 	@param  force_chunked
 			override internal chunked
 */
+// 2026-08-31: was a flat 200ms here on every single notify() call, including once per chunk in
+// the multi-packet path below - sendCommand() runs synchronously from ChronosESP32::loop(), so
+// this blocks the caller's whole task for that long, every time. A single-chunk send (e.g.
+// sendBattery()) cost 200ms; a long chunked send (e.g. sendESP()'s device-info string, ~14-27
+// chunks) cost up to ~5.4 SECONDS of continuous blocking - confirmed via on-device instrumented
+// logging in a consuming project (chronos-watch), where this was the actual root cause of
+// user-visible multi-second stalls and animation jerk, misdiagnosed at first as a PMU/I2C issue.
+// Reduced to 30ms: still comfortably above a typical negotiated BLE connection interval
+// (commonly 15-50ms), so pacing is preserved, just far less conservative than 200ms. Needs
+// on-device confirmation that no notifications are dropped/missed at this shorter interval
+// before treating this as final - flag this value if that's not yet been verified.
+#define SEND_COMMAND_NOTIFY_DELAY_MS 30
+
 void ChronosESP32::sendCommand(uint8_t *command, size_t length, bool force_chunked)
 {
 	if (!_inited)
@@ -492,14 +505,14 @@ void ChronosESP32::sendCommand(uint8_t *command, size_t length, bool force_chunk
 		// Send the entire command if it fits in one packet
 		pCharacteristicTX->setValue(command, length);
 		pCharacteristicTX->notify();
-		vTaskDelay(200 / portTICK_PERIOD_MS);
+		vTaskDelay(SEND_COMMAND_NOTIFY_DELAY_MS / portTICK_PERIOD_MS);
 	}
 	else
 	{
 		// Send the first 20 bytes as is (no header)
 		pCharacteristicTX->setValue(command, 20);
 		pCharacteristicTX->notify();
-		vTaskDelay(200 / portTICK_PERIOD_MS);
+		vTaskDelay(SEND_COMMAND_NOTIFY_DELAY_MS / portTICK_PERIOD_MS);
 
 		// Send the remaining bytes with a header
 		const size_t maxPayloadSize = 19; // Payload size excluding header
@@ -521,7 +534,7 @@ void ChronosESP32::sendCommand(uint8_t *command, size_t length, bool force_chunk
 			// Send the chunk
 			pCharacteristicTX->setValue(chunk, bytesToSend + 1);
 			pCharacteristicTX->notify();
-			vTaskDelay(200 / portTICK_PERIOD_MS);
+			vTaskDelay(SEND_COMMAND_NOTIFY_DELAY_MS / portTICK_PERIOD_MS);
 
 			// Update offset
 			offset += bytesToSend;
